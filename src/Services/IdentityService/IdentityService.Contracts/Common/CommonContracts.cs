@@ -1,0 +1,1 @@
+// This file is now replaced by separate contract files for each domain

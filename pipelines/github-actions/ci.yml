@@ -1,0 +1,548 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+    tags: ["v*"]
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize, reopened]
+
+env:
+  DOTNET_VERSION: "8.0.x"
+  BUILD_CONFIGURATION: Release
+  DOCKER_REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  # ==============================================================================
+  # SECURITY & VALIDATION
+  # ==============================================================================
+
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-results.sarif"
+
+      - name: Upload Trivy scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results.sarif"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: csharp
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore dependencies
+        run: dotnet restore Acme.Platform.sln --locked-mode
+
+      - name: Build for CodeQL
+        run: dotnet build Acme.Platform.sln --no-restore --configuration ${{ env.BUILD_CONFIGURATION }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+
+      - name: Dependency Vulnerability Check
+        run: |
+          dotnet list package --vulnerable --include-transitive 2>&1 | tee vulnerability-check.log
+          if grep -q "vulnerable" vulnerability-check.log; then
+            echo "::error::Vulnerable packages detected"
+            exit 1
+          fi
+
+      - name: Secret Scanning (GitGuardian)
+        uses: GitGuardian/ggshield-action@v1
+        env:
+          GITHUB_PUSH_BEFORE_SHA: ${{ github.event.before }}
+          GITHUB_PUSH_BASE_SHA: ${{ github.event.base }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITGUARDIAN_API_KEY: ${{ secrets.GITGUARDIAN_API_KEY }}
+
+  # ==============================================================================
+  # BUILD & TEST
+  # ==============================================================================
+
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    needs: security-scan
+    strategy:
+      matrix:
+        test-type: [unit, integration, contract]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: acme_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+      rabbitmq:
+        image: rabbitmq:3-management-alpine
+        env:
+          RABBITMQ_DEFAULT_USER: guest
+          RABBITMQ_DEFAULT_PASS: guest
+        ports:
+          - 5672:5672
+          - 15672:15672
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            ${{ runner.os }}-nuget-
+
+      - name: Restore dependencies
+        run: dotnet restore Acme.Platform.sln --locked-mode
+
+      - name: Build solution
+        run: dotnet build Acme.Platform.sln --no-restore --configuration ${{ env.BUILD_CONFIGURATION }}
+
+      - name: Code formatting check
+        run: dotnet format --verify-no-changes --severity error
+
+      - name: Run Unit Tests
+        if: matrix.test-type == 'unit'
+        run: |
+          dotnet test tests/UnitTests/UnitTests.csproj \
+            --no-build \
+            --configuration ${{ env.BUILD_CONFIGURATION }} \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./TestResults/Unit \
+            --logger "trx;LogFileName=unit-tests.trx" \
+            --logger "console;verbosity=detailed"
+
+      - name: Run Integration Tests
+        if: matrix.test-type == 'integration'
+        env:
+          ConnectionStrings__DefaultConnection: "Host=localhost;Port=5432;Database=acme_test;Username=postgres;Password=postgres"
+          ConnectionStrings__Redis: "localhost:6379"
+          ConnectionStrings__RabbitMQ: "amqp://guest:guest@localhost:5672/"
+        run: |
+          dotnet test tests/IntegrationTests/IntegrationTests.csproj \
+            --no-build \
+            --configuration ${{ env.BUILD_CONFIGURATION }} \
+            --collect:"XPlat Code Coverage" \
+            --results-directory ./TestResults/Integration \
+            --logger "trx;LogFileName=integration-tests.trx" \
+            --logger "console;verbosity=detailed"
+
+      - name: Run Contract Tests
+        if: matrix.test-type == 'contract'
+        run: |
+          dotnet test tests/ContractTests/ContractTests.csproj \
+            --no-build \
+            --configuration ${{ env.BUILD_CONFIGURATION }} \
+            --results-directory ./TestResults/Contract \
+            --logger "trx;LogFileName=contract-tests.trx" \
+            --logger "console;verbosity=detailed"
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results-${{ matrix.test-type }}
+          path: TestResults/
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: Test Results (${{ matrix.test-type }})
+          path: TestResults/**/*.trx
+          reporter: dotnet-trx
+
+  # ==============================================================================
+  # CODE QUALITY & COVERAGE
+  # ==============================================================================
+
+  code-quality:
+    name: Code Quality Analysis
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Restore tools
+        run: dotnet tool restore
+
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: test-results-*
+          path: TestResults/
+          merge-multiple: true
+
+      - name: Generate Coverage Report
+        run: |
+          dotnet tool install --global dotnet-reportgenerator-globaltool
+          reportgenerator \
+            -reports:"TestResults/**/coverage.cobertura.xml" \
+            -targetdir:"TestResults/CoverageReport" \
+            -reporttypes:"Html;Cobertura;JsonSummary" \
+            -historydir:"TestResults/CoverageHistory"
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: TestResults/CoverageReport/Cobertura.xml
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+      - name: Coverage Gate Check
+        run: |
+          COVERAGE=$(jq -r '.summary.linecoverage' TestResults/CoverageReport/Summary.json)
+          THRESHOLD=80
+          echo "Current coverage: $COVERAGE%"
+          echo "Required threshold: $THRESHOLD%"
+          if (( $(echo "$COVERAGE < $THRESHOLD" | bc -l) )); then
+            echo "::error::Coverage $COVERAGE% is below threshold of $THRESHOLD%"
+            exit 1
+          fi
+
+      - name: Mutation Testing
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          dotnet stryker --solution-path Acme.Platform.sln \
+            --reporters "['html','progress','json','cleartext']" \
+            --output-dir ./TestResults/Mutation \
+            --threshold-high 80 \
+            --threshold-low 70 \
+            --threshold-break 60
+
+      - name: Upload coverage artifacts
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: coverage-report
+          path: TestResults/CoverageReport/
+
+      - name: Upload mutation test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: mutation-report
+          path: TestResults/Mutation/
+
+  # ==============================================================================
+  # DOCKER BUILD & PUSH
+  # ==============================================================================
+
+  docker-build:
+    name: Docker Build and Push
+    runs-on: ubuntu-latest
+    needs: [security-scan, build-and-test]
+    if: github.event_name == 'push'
+    strategy:
+      matrix:
+        service: [apigateway, coreworkflowservice, integrationhub]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKER_REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.DOCKER_REGISTRY }}/${{ env.IMAGE_NAME }}-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: src/Services/${{ matrix.service }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILD_VERSION=${{ github.sha }}
+            BUILD_DATE=${{ github.event.head_commit.timestamp }}
+
+  # ==============================================================================
+  # INFRASTRUCTURE VALIDATION
+  # ==============================================================================
+
+  infrastructure-validation:
+    name: Infrastructure Validation
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: latest
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive deploy/iac/
+
+      - name: Terraform Init
+        run: |
+          cd deploy/iac
+          terraform init -backend=false
+
+      - name: Terraform Validate
+        run: |
+          cd deploy/iac
+          terraform validate
+
+      - name: Terraform Plan (Dry Run)
+        run: |
+          cd deploy/iac
+          terraform plan -var-file="environments/dev.tfvars" -out=tfplan
+
+      - name: Checkov Security Scan
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: deploy/iac
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov-results.sarif
+
+      - name: Upload Checkov scan results
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+
+  # ==============================================================================
+  # HELM CHART VALIDATION
+  # ==============================================================================
+
+  helm-validation:
+    name: Helm Chart Validation
+    runs-on: ubuntu-latest
+    needs: security-scan
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Helm
+        uses: azure/setup-helm@v3
+        with:
+          version: latest
+
+      - name: Lint Helm Charts
+        run: |
+          for chart in deploy/k8s/helm/*/; do
+            echo "Linting $chart"
+            helm lint "$chart"
+          done
+
+      - name: Template Helm Charts
+        run: |
+          for chart in deploy/k8s/helm/*/; do
+            echo "Templating $chart"
+            helm template test "$chart" --values "$chart/values.yaml"
+          done
+
+  # ==============================================================================
+  # PERFORMANCE & LOAD TESTING
+  # ==============================================================================
+
+  performance-testing:
+    name: Performance Testing
+    runs-on: ubuntu-latest
+    needs: docker-build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for k6
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Start services for testing
+        run: |
+          docker-compose up -d
+          sleep 30  # Wait for services to be ready
+
+      - name: Run Load Tests
+        run: |
+          k6 run tests/load/healthcheck.k6.js \
+            --out json=results.json \
+            --summary-trend-stats="avg,min,med,max,p(95),p(99)" \
+            --summary-time-unit=ms
+
+      - name: Upload performance results
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results
+          path: results.json
+
+  # ==============================================================================
+  # DEPLOYMENT
+  # ==============================================================================
+
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs:
+      [code-quality, docker-build, infrastructure-validation, helm-validation]
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Staging
+        run: |
+          echo "Deploying to staging environment..."
+          # Add staging deployment logic here
+          # kubectl apply -f deploy/k8s/staging/
+          # helm upgrade --install acme-platform deploy/k8s/helm/apigateway/
+
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs:
+      [
+        code-quality,
+        docker-build,
+        infrastructure-validation,
+        helm-validation,
+        performance-testing,
+      ]
+    if: startsWith(github.ref, 'refs/tags/v')
+    environment: production
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Production
+        run: |
+          echo "Deploying to production environment..."
+          # Add production deployment logic here
+          # Blue-green or canary deployment strategy
+
+  # ==============================================================================
+  # NOTIFICATIONS & CLEANUP
+  # ==============================================================================
+
+  notify-completion:
+    name: Notify Completion
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    steps:
+      - name: Notify Slack on Success
+        if: needs.deploy-staging.result == 'success' || needs.deploy-production.result == 'success'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: success
+          channel: "#deployments"
+          text: "🚀 Acme Platform deployment completed successfully!"
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+      - name: Notify Slack on Failure
+        if: needs.deploy-staging.result == 'failure' || needs.deploy-production.result == 'failure'
+        uses: 8398a7/action-slack@v3
+        with:
+          status: failure
+          channel: "#deployments"
+          text: "❌ Acme Platform deployment failed. Check logs for details."
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  cleanup:
+    name: Cleanup
+    runs-on: ubuntu-latest
+    needs: [deploy-staging, deploy-production]
+    if: always()
+    steps:
+      - name: Cleanup old artifacts
+        run: |
+          echo "Cleaning up old build artifacts and containers..."
+          # Add cleanup logic for old images, artifacts, etc.

@@ -1,0 +1,22 @@
+# Example BPMN 2.0 Process (Workflow Automation Profile)
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<definitions xmlns="http://www.omg.org/spec/BPMN/20100524/MODEL"
+             xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+             targetNamespace="http://acme.com/bpmn">
+  <process id="SupportTicket" name="Support Ticket Workflow" isExecutable="true">
+    <startEvent id="StartEvent_1" name="Ticket Created"/>
+    <task id="Task_1" name="Assign Agent"/>
+    <exclusiveGateway id="Gateway_1" name="Urgent?"/>
+    <task id="Task_2" name="Escalate"/>
+    <task id="Task_3" name="Resolve"/>
+    <endEvent id="EndEvent_1" name="Closed"/>
+    <!-- Sequence flows omitted for brevity -->
+  </process>
+</definitions>
+```
+
+- BPMN 2.0 XML for a support ticket workflow.
+- Used for process modeling and engine integration.
+- Connectors map to tasks and events in IntegrationHub.

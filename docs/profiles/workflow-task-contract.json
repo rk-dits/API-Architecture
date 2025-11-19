@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Workflow Automation: Task Assignment Contract",
+  "type": "object",
+  "properties": {
+    "taskId": { "type": "string", "description": "Unique task identifier" },
+    "assignee": { "type": "string", "description": "User or group assigned" },
+    "dueDate": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Task due date/time"
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["Low", "Normal", "High"],
+      "description": "Task priority"
+    },
+    "metadata": { "type": "object", "description": "Additional task metadata" }
+  },
+  "required": ["taskId", "assignee", "dueDate", "priority"]
+}

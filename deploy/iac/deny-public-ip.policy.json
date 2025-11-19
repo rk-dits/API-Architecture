@@ -1,0 +1,24 @@
+# Sample Azure Policy-as-Code (Deny Public IP)
+
+{
+  "properties": {
+    "displayName": "Deny Public IP on VMs",
+    "policyType": "BuiltIn",
+    "mode": "All",
+    "description": "This policy denies the creation of public IP addresses on virtual machines.",
+    "parameters": {},
+    "policyRule": {
+      "if": {
+        "allOf": [
+          {
+            "field": "type",
+            "equals": "Microsoft.Network/publicIPAddresses"
+          }
+        ]
+      },
+      "then": {
+        "effect": "deny"
+      }
+    }
+  }
+}

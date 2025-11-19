@@ -1,0 +1,23 @@
+# Example FHIR Patient Contract (Healthcare Profile)
+
+```json
+{
+  "resourceType": "Patient",
+  "id": "12345",
+  "name": [
+    { "family": "Doe", "given": ["John"] }
+  ],
+  "gender": "male",
+  "birthDate": "1980-01-01",
+  "address": [
+    { "line": ["123 Main St"], "city": "Metropolis", "state": "NY", "postalCode": "12345" }
+  ],
+  "identifier": [
+    { "system": "http://hospital.org/mrn", "value": "MRN123456" }
+  ]
+}
+```
+
+- FHIR R4 Patient resource example for API contract.
+- Extend with SNOMED CT/LOINC codes for observations as needed.
+- Use in IntegrationHub for mapping to provider APIs.

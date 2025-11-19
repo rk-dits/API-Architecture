@@ -1,0 +1,37 @@
+root = true
+
+# General C# conventions
+[*.cs]
+charset = utf-8
+indent_style = space
+indent_size = 4
+insert_final_newline = true
+trim_trailing_whitespace = true
+
+# Treat warnings as errors selectively
+# Suppress XML doc warnings for now to reduce noise; can be re-enabled later.
+dotnet_diagnostic.CS1591.severity = silent
+
+# Require var for local types when obvious
+csharp_style_var_for_built_in_types = true:suggestion
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = false:suggestion
+
+# Expression-bodied members preferences
+csharp_style_expression_bodied_methods = when_on_single_line:suggestion
+csharp_style_expression_bodied_properties = when_on_single_line:suggestion
+
+# Using directive placement (outside namespaces)
+csharp_using_directive_placement = outside_namespace:suggestion
+
+# New line preferences
+csharp_new_line_before_open_brace = all
+
+# File scoped namespace preference
+csharp_style_namespace_declarations = file_scoped:suggestion
+
+# Prefer readonly structs where possible
+csharp_style_prefer_readonly_struct = true:suggestion
+
+# Analyzer configuration placeholder for future security/compliance rules
+# dotnet_analyzer_diagnostic.category-Compliance.severity = warning

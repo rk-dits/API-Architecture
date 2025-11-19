@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: { { include "apigateway.fullname" . } }
+  labels:
+    app: { { include "apigateway.name" . } }
+spec:
+  type: { { .Values.service.type } }
+  ports:
+    - port: { { .Values.service.port } }
+      targetPort: 80
+  selector:
+    app: { { include "apigateway.name" . } }

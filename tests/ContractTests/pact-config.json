@@ -1,0 +1,29 @@
+{
+  "pact": {
+    "pactBroker": {
+      "url": "https://pact-broker.acme.com",
+      "token": "${PACT_BROKER_TOKEN}"
+    },
+    "provider": {
+      "name": "AcmePlatform",
+      "version": "${BUILD_NUMBER}",
+      "branch": "${GIT_BRANCH}",
+      "tags": ["${ENVIRONMENT}"]
+    },
+    "consumer": {
+      "name": "AcmeClient",
+      "version": "${BUILD_NUMBER}",
+      "branch": "${GIT_BRANCH}",
+      "tags": ["${ENVIRONMENT}"]
+    }
+  },
+  "logging": {
+    "level": "Information",
+    "outputDirectory": "./logs"
+  },
+  "verification": {
+    "timeout": 30,
+    "stateChangeUrl": "http://localhost:5000/pact/provider-states",
+    "publishResults": true
+  }
+}

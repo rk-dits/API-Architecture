@@ -1,0 +1,6 @@
+@CoreWorkflowService.Api_HostAddress = http://localhost:5193
+
+GET {{CoreWorkflowService.Api_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

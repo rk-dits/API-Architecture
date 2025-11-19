@@ -1,0 +1,80 @@
+# Build results
+bin/
+obj/
+
+# Visual Studio files
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Rider IDE files
+.idea/
+
+# Visual Studio Code files
+.vscode/
+
+# NuGet packages
+*.nupkg
+*.snupkg
+packages/
+# Uncomment if you have local NuGet packages
+# *.nupkg
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+
+# Test results
+TestResults/
+*.trx
+*.coverage
+*.coveragexml
+
+# Generated files
+Generated_Code/
+
+# Publish outputs
+publish/
+dist/
+
+# ASP.NET Scaffolding
+ScaffoldingReadMe.txt
+
+# DotCover
+.idea/.dotCover
+
+# Resharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+
+# StyleCop
+StyleCopReport.xml
+
+# Backup & reports
+*_Backup*/
+*_UpgradeReport_Files/
+
+# Others
+*.dbmdl
+*.jfm
+*.pdb
+*.mdb
+
+# Entity Framework
+Migrations/
+
+# Tye
+.tye/
+
+# Local secrets
+secrets.json
+
+# Docker
+docker-compose.override.yml

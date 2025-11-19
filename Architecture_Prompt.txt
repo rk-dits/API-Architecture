@@ -1,0 +1,535 @@
+Final Unified Prompt — .NET Platform (Healthcare, Logistics, Workflow Automation) + HIPAA Compliance Pack
+You are a senior .NET Solution Architect. Design and scaffold a generic, reusable, microservice-ready REST API platform for Acme Corp that is domain-agnostic with ready-to-use profiles for Healthcare, Logistics, and Workflow Automation. The platform must be maintainable for 20+ years without architectural rewrites and include a HIPAA-ready compliance pack.
+Target stack & principles
+.NET 8 LTS (C# 12), ASP.NET Core (Minimal APIs or Controllers — pick and justify).
+
+
+Clean Architecture + DDD with vertical slices; optional CQRS + MediatR (explain when it helps/hurts).
+
+
+Strict SoC; inward dependency rule; composition > inheritance; immutable Value Objects; persistence-ignorant domain.
+
+
+High testability; deterministic builds; reproducible infrastructure.
+
+
+Deliverables (in one response)
+Architecture overview
+
+
+Strategy: monolith-first → modular monolith → microservices, with clear decision triggers.
+
+
+Mermaid context, container, and request lifecycle diagrams (gateway → API → app → domain → persistence/messaging → response).
+
+
+Trade-offs: slices vs layers, when to split services, CQRS pros/cons.
+
+
+Repository layout (.sln)
+
+
+/solution-root
+  /src
+    /BuildingBlocks
+      /Common                 # Result<T>, errors, pagination, ProblemDetails
+      /Infrastructure         # Serilog, OpenTelemetry, Polly, Redis, Outbox, IdP client
+      /Messaging              # MassTransit abstractions, message contracts, consumer base
+      /Persistence            # EF Core base, UoW, repositories, migration helpers
+      /ApiGateway             # YARP config, rate limiting, routing, authz offload
+    /Services
+      /IntegrationHub                     # All third-party traffic terminates here
+        /IntegrationHub.Api               # HTTP bootstrap, SSE/SignalR, webhooks
+        /IntegrationHub.Application       # Orchestrations, policies, flow control
+        /IntegrationHub.Domain            # Operation, ProviderRequest/Response, events
+        /IntegrationHub.Infrastructure    # HTTP clients, Polly, Outbox/Inbox, Redis, EF Core
+        /IntegrationHub.Contracts         # Operation + provider contracts (NuGet)
+      /CoreWorkflowService                # Neutral domain example
+        /CoreWorkflowService.Api
+        /CoreWorkflowService.Application
+        /CoreWorkflowService.Domain
+        /CoreWorkflowService.Infrastructure
+        /CoreWorkflowService.Contracts
+    /Providers (optional per-provider microservices if needed)
+/modules
+  /UserManagement /Logging /Notifications /Reporting
+/tests
+  /{Svc}.UnitTests
+  /{Svc}.IntegrationTests           # Testcontainers (PostgreSQL/Redis/RabbitMQ)
+  /{Svc}.ContractTests              # Pact provider/consumer
+  /Solution.E2E                     # Playwright/REST e2e
+/deploy
+  docker-compose.yml
+  /k8s/helm/{service}
+/pipelines
+  /github-actions/{service}.yml
+  /azure-devops/{service}.yml
+.editorconfig .globalconfig Directory.Build.props/targets nuget.config
+
+Naming & coding standards
+
+
+Projects {Service}.{Layer}; namespaces mirror folders; singular entities; plural collections; Async suffix; interfaces I*.
+
+
+DTOs {Verb}{Resource}Request/Response.
+
+
+Enforce via .editorconfig, Roslyn analyzers, StyleCop.Analyzers, dotnet format.
+
+
+XML docs on public APIs; nullable enable; implicit usings; required members where appropriate.
+
+
+API design (REST)
+
+
+Resource naming, HTTP semantics, idempotency, conditional requests (ETag/If-Match), pagination (cursor & offset), filtering, sorting.
+
+
+Versioning (/v1) + deprecation headers and a sunset policy template.
+
+
+Errors: RFC 7807 ProblemDetails with consistent error codes.
+
+
+OpenAPI (Swashbuckle/NSwag) with XML comments, examples, security schemes, tags, operationIds.
+
+
+Security baseline
+
+
+OAuth2/OIDC (Entra ID): JWT access tokens; scopes/roles; RBAC/ABAC.
+
+
+Gateway: authn/z, rate limiting, WAF/bot, CORS.
+
+
+mTLS service-to-service; TLS 1.2+; security headers; CSRF where needed.
+
+
+Input validation (FluentValidation), safe serialization, allow-lists; secrets in Azure Key Vault with rotation.
+
+
+Threat model summary; OWASP ASVS & Top 10 mapping; tamper-evident audit logging.
+
+
+PII/PHI minimization; right-to-erasure/export hooks; retention policies.
+
+
+Data & persistence (polyglot-ready, RDBMS-first)
+
+
+DB-per-service on PostgreSQL (EF Core, migrations).
+
+
+Polyglot (justify before adding):
+
+
+MongoDB (documents), OpenSearch (text/analytics), Redis (cache/locks/projections).
+
+
+Analytics: Synapse via CDC/ETL; Event store: none by default (propose only if temporal modeling needed).
+
+
+Details: optimistic concurrency (xmin/rowversion); soft deletes; spec/repo where valuable; Outbox for reliable events; Inbox/dedupe; multi-tenancy (schema or discriminator); Redis cache-aside + stampede prevention; ETag-aware response caching.
+
+
+Third-party integrations (via IntegrationHub)
+
+
+Boundary: all third-party calls & webhooks terminate in IntegrationHub.
+
+
+Patterns:
+
+
+Preferred async: domain publishes StartOperation (bus) → IntegrationHub fans out → emits PartialResultAvailable / OperationCompleted.
+
+
+Optional HTTP bootstrap: POST /integrations/operations → 202 + operationId.
+
+
+Adapters vs. per-provider services: default adapters in IntegrationHub; split hot providers into microservices behind the same contracts if needed.
+
+
+Resilience (Polly): timeouts, retries (jittered backoff), circuit breakers, bulkheads, hedging for tail latency.
+
+
+Idempotency: outbound Idempotency-Key; inbox/outbox dedupe with request hashes.
+
+
+Rate limits & auth: token buckets per provider; OAuth2 client creds/JWT assertion/API keys; automatic token refresh; key rotation.
+
+
+Observability: provider-tagged spans, response classification, p95/p99, SLOs + error budgets.
+
+
+Fallbacks: last-known-good cache (TTL) or secondary provider where allowed.
+
+
+Webhooks (owned by IntegrationHub):
+
+
+Inbound /webhooks/{provider}: verify HMAC/Ed25519 + timestamp; replay protection; enqueue fast; idempotent by event id; retries + DLQ.
+
+
+Outbound (optional): tenant-scoped webhooks to downstream systems; documented signature & retry policy.
+
+
+Resilience & performance
+
+
+Timeouts, retries, circuit breakers, bulkheads (Polly).
+
+
+Health checks (/health, /ready, /live), OpenTelemetry tracing/metrics/logs (Serilog sinks).
+
+
+Performance budgets, async I/O, pooling, warmups.
+
+
+8.1) Parallel fan-out with real-time partial results
+Operation Orchestration (IntegrationHub) + streaming UI.
+
+
+Start: POST /integrations/operations → 202 with operationId (or async bus kickoff).
+
+
+Fan-out: dispatch to N providers; each partial stored in Redis and snapshotted in PostgreSQL; emit PartialResultAvailable.
+
+
+Real-time to UI:
+
+
+SignalR hub group operation:{id}; SSE GET /integrations/operations/{id}/events; polling GET /integrations/operations/{id}; NDJSON stream GET /integrations/operations/{id}/stream.
+
+
+Merging: deterministic policy (timestamp/priority/score) with source, receivedAt, confidence.
+
+
+Timeouts/SLA: per-provider + global; late arrivals refresh cache but don’t flip status unless configured.
+
+
+Idempotency/resumption: idempotent POST via client key; clients rejoin SignalR groups by operationId.
+
+
+Security: scope/tenant on operationId; rate limits & backpressure.
+
+
+Testing strategy
+
+
+Unit (xUnit/NUnit), application tests, integration (Testcontainers), contract tests (Pact), e2e (Playwright), load (k6).
+
+
+Mutation testing (Stryker.NET) thresholds; coverage gates; flaky test quarantine.
+
+
+DevEx & CI/CD
+
+
+Makefile/PS tasks; local docker-compose for Postgres, Redis, RabbitMQ, Jaeger, Seq (+ seed data).
+
+
+GitHub Actions/Azure DevOps: SBOM, SAST (CodeQL), DAST gates; container scanning (Trivy).
+
+
+Versioning (GitVersion/MinVer), conventional commits, release notes.
+
+
+Blue/green or canary deployments; DB migration rollout; SLSA supply-chain controls; secret scanning.
+
+
+Scaffold a minimal vertical slice (neutral domain + IntegrationHub)
+
+
+CoreWorkflowService: aggregate WorkflowCase; commands/queries (MediatR); validators; versioned endpoints; ProblemDetails; OpenAPI.
+
+
+IntegrationHub:
+
+
+POST /integrations/operations → 202 + operationId
+
+
+GET /integrations/operations/{id} (aggregate)
+
+
+GET /integrations/operations/{id}/events (SSE)
+
+
+GET /integrations/operations/{id}/stream (NDJSON)
+
+
+POST /webhooks/{provider} (verify + enqueue)
+
+
+RealTimeHub : Hub (SignalR) group operation:{id}
+
+
+Infra: Redis (partials), PostgreSQL (snapshot), MassTransit (RabbitMQ), Outbox/Inbox, Polly.
+
+
+Providers: two sample adapters (e.g., FooAdapter, BarAdapter) with policy bundles.
+
+
+Tests: adapter Pact tests; SignalR integration; operation lifecycle incl. timeouts.
+
+
+Provide exact dotnet CLI/PowerShell commands to create projects, add packages, and wire DI.
+
+
+Config & environments
+
+
+appsettings.{Environment}.json; options binding; feature flags (Azure App Configuration).
+
+
+Twelve-Factor parity; sample Grafana/Prometheus dashboards.
+
+
+Documentation (dev & ops)
+
+
+Root README.md + service READMEs; ADR template with one completed example; contribution guide; security policy.
+
+
+docs/guidelines.md: how to add/remove/extend a module; “10-minute first endpoint.”
+
+
+Runbooks: backup/restore; RPO/RTO; DR tiers; blue/green/canary playbooks.
+
+
+API governance: linting rules, naming consistency, deprecation workflow.
+
+
+
+Domain Profiles (generate guidance, contracts, and examples for each)
+A) Healthcare profile
+Compliance & security: HIPAA/HITECH (PHI handling), regional data residency, audit trails, least privilege; BAAs noted in docs.
+
+
+Standards:
+
+
+HL7 FHIR R4/R5 REST patterns (Patient, Encounter, Observation), profiles, terminology bindings (SNOMED CT, LOINC).
+
+
+HL7 v2 (ADT/ORM/ORU) via IntegrationHub adapters; ACK handling; batching; replay/dedupe.
+
+
+DICOM (optional) pointer model; do not store large binaries in OLTP; store metadata + signed URLs.
+
+
+Interoperability: SMART on FHIR OAuth flows; provenance; consent management; audit events.
+
+
+Data: PHI classification, field-level encryption for sensitive elements; immutable audit logs; retention & purge policies.
+
+
+Real-time: streaming vitals/monitoring via SignalR/SSE with safe throttling.
+
+
+B) Logistics profile
+Standards: EDI X12/EDIFACT (e.g., 940/945/856/214) adapters in IntegrationHub; GS1 identifiers; ISO 8601/UTC time rigor; geo standards.
+
+
+Capabilities: track & trace events, carrier rate-shopping (fan-out), geofencing, route ETA updates (partial results merged by provider/time).
+
+
+IoT ingestion: device telemetry endpoints; backpressure & burst controls; cold-path vs hot-path.
+
+
+Data: location privacy, tamper-evident chain of custody.
+
+
+C) Workflow Automation profile
+Process modeling: BPMN 2.0 diagrams; optional engine integration (e.g., Camunda/Temporal via adapters).
+
+
+Work items: queueing, SLAs/escalations, assignment rules, human-in-the-loop approvals.
+
+
+Connectors: SaaS integrations (Zendesk/Jira/O365/Slack) through IntegrationHub; webhooks both directions; partial updates for long-running orchestrations.
+
+
+For each profile, generate: (1) profile-specific ADRs, (2) example contracts & mappings, (3) policy bundles (timeouts/retries), (4) security & compliance checklist, (5) sample provider adapters.
+
+Platform & operations (apply to all profiles)
+SLOs/Error Budgets per service/provider (availability, p95/p99 latency) with alerting and on-call runbooks.
+
+
+Chaos & Load: k6 load profiles; failure injection/chaos experiments; automated resilience drills.
+
+
+Backup/DR: PITR backups; restore playbooks; DR test cadence.
+
+
+Multi-region: active/passive plan; data replication approach; failover runbook.
+
+
+FinOps/Cost: env budgets, spend alarms, CI cost guardrails (infra plan diffs).
+
+
+IaC: Terraform or Bicep; environment promotion; policy-as-code (OPA/Azure Policy).
+
+
+Network hardening: mTLS, network policies, WAF/DDoS, egress allow-lists for provider calls.
+
+
+Data & compliance: DSR (export/delete), archival tiers, legal hold; log scrubbing/masking; KMS/HSM key rotation; schema governance & CDC (Debezium).
+
+
+Migrations: expand-migrate-contract; online indexes; canary migrations.
+
+
+Messaging & contracts: Avro/Protobuf + Schema Registry; compatibility rules; DLQs & redrive; outbox/inbox/idempotency keys.
+
+
+
+HIPAA Compliance Pack (generate artifacts & controls)
+Administrative safeguards
+Risk Analysis & Risk Management: worksheet + initial threat model; register of risks with owners and mitigations.
+
+
+Policies & Procedures templates: Access Control, Minimum Necessary, Incident Response, Change Management, Vendor Risk, Data Retention/Archival, Key Management, Logging & Monitoring, Secure Development.
+
+
+BAA Tracker: vendors (cloud, logging/monitoring, backups, IntegrationHub providers), BAA status, data flows.
+
+
+Workforce Training: annual HIPAA training checklist and acknowledgment capture.
+
+
+Access Governance: joiner–mover–leaver workflow; quarterly access reviews checklist and evidence template; least-privilege guidance.
+
+
+Physical safeguards
+Facility access alignment with cloud/IaaS provider; device/media protection; backup media handling; secure disposal procedures.
+
+
+Backup/DR evidence: PITR objectives (RPO/RTO), restore test schedule, proof-of-restore template.
+
+
+Technical safeguards & extras
+Unique user IDs; MFA on admin endpoints; automatic logoff for admin portals; emergency access procedures.
+
+
+Comprehensive Audit Log Schema (actor, subject, action, purpose-of-use, correlation IDs) with immutable storage tier and SIEM forwarding + alert playbooks (excessive access, failed logins, exfiltration).
+
+
+PHI Data Map: inventory of PHI fields per service, classification tags, masking rules, log redaction, field-level encryption decisions.
+
+
+Breach Response: RACI, timelines, evidence collection, communication templates.
+
+
+Data locality/residency controls where required.
+
+
+SMART on FHIR considerations (for Cures Act alignment): scopes, patient access endpoints, provenance/consent capture.
+
+
+
+Assumptions & knobs (pre-filled — change as needed)
+Cloud: Azure
+
+
+Gateway: YARP
+
+
+Message broker: RabbitMQ (MassTransit)
+
+
+DB per service (OLTP): PostgreSQL
+
+
+Document store: MongoDB (enabled selectively)
+
+
+Search: OpenSearch (disabled by default)
+
+
+Cache: Redis
+
+
+Event store: None (propose EventStoreDB only if temporal modeling is needed)
+
+
+Identity provider: Entra ID
+
+
+Target deployment: Kubernetes (AKS)
+
+
+3P boundary: IntegrationHub = true; per-provider microservices = false (toggle true if needed)
+
+
+Result store: Redis; Snapshot DB: PostgreSQL
+
+
+Real-time: SignalR + SSE fallback; NDJSON stream enabled
+
+
+Timeout policy: Per-provider = 5–8s, overall SLA = 12–15s
+
+
+Domain profiles to generate: Healthcare, Logistics, Workflow Automation
+
+
+Neutral service to scaffold now: CoreWorkflowService + IntegrationHub
+
+
+Acceptance criteria
+All diagrams render (Mermaid).
+
+
+Solution skeleton builds and tests pass via a single command.
+
+
+Minimal slice runs with docker-compose (PostgreSQL + Redis + RabbitMQ + Jaeger + Seq).
+
+
+OpenAPI available & secured; health/readiness endpoints green.
+
+
+IntegrationHub handles all third-party calls & webhooks; domain services have no provider SDKs/DTOs.
+
+
+Partial results reach clients in < 300 ms median after provider arrival (SignalR/SSE).
+
+
+HIPAA Acceptance:
+
+
+PHI encrypted in transit and at rest; specified fields use field-level encryption.
+
+
+Audit events for create/read/update/delete of PHI include actor, subject, purpose, correlation IDs; shipped to SIEM; retained per policy.
+
+
+Access controls enforce least privilege; MFA on admin endpoints; session timeouts/automatic logoff configured.
+
+
+BAAs tracked for every vendor with potential PHI exposure; status recorded in BAA Tracker.
+
+
+Risk Analysis produced with top risks and mitigations mapped to repo controls.
+
+
+Runbooks for incident response, breach notification, and DR generated and linked in README.
+
+
+No PHI in logs or telemetry; masking/redaction rules and tests included.
+
+
+Quarterly access review and backup restore test checklists generated with sample evidence.
+
+
+Profile artifacts (contracts, adapters, checklists) are generated for Healthcare, Logistics, Workflow Automation.
+
+
+Docs include “Add a new module” and the 10-minute first endpoint.
+
+

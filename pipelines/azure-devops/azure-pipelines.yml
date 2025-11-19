@@ -1,0 +1,604 @@
+# Azure DevOps Pipeline for Acme Platform
+# Comprehensive CI/CD pipeline with security, testing, and deployment
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  tags:
+    include:
+      - v*
+  paths:
+    exclude:
+      - docs/*
+      - README.md
+
+pr:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    exclude:
+      - docs/*
+      - README.md
+
+variables:
+  # Build Configuration
+  dotnetVersion: '8.0.x'
+  buildConfiguration: 'Release'
+  vmImageName: 'ubuntu-latest'
+  
+  # Container Registry
+  containerRegistry: 'acmeplatform.azurecr.io'
+  dockerRegistryServiceConnection: 'ACRConnection'
+  
+  # Kubernetes
+  kubernetesServiceConnection: 'AKSConnection'
+  kubernetesNamespace: 'acme-platform'
+  
+  # Security
+  sonarQubeServiceConnection: 'SonarQubeConnection'
+  
+  # Versioning
+  ${{ if startsWith(variables['Build.SourceBranch'], 'refs/tags/') }}:
+    imageTag: $(Build.SourceBranchName)
+  ${{ else }}:
+    imageTag: $(Build.SourceBranchName)-$(Build.BuildNumber)
+
+pool:
+  vmImage: $(vmImageName)
+
+stages:
+  # ============================================================================
+  # BUILD & SECURITY SCANNING
+  # ============================================================================
+  
+  - stage: SecurityScan
+    displayName: 'Security Scanning'
+    jobs:
+      - job: StaticAnalysis
+        displayName: 'Static Code Analysis'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: UseDotNet@2
+            displayName: 'Use .NET $(dotnetVersion)'
+            inputs:
+              packageType: 'sdk'
+              version: $(dotnetVersion)
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Restore packages'
+            inputs:
+              command: 'restore'
+              projects: '**/*.csproj'
+              feedsToUse: 'config'
+              nugetConfigPath: 'nuget.config'
+
+          - task: SonarQubePrepare@5
+            displayName: 'Prepare SonarQube Analysis'
+            inputs:
+              SonarQube: $(sonarQubeServiceConnection)
+              scannerMode: 'MSBuild'
+              projectKey: 'acme-platform'
+              projectName: 'Acme Platform'
+              extraProperties: |
+                sonar.cs.opencover.reportsPaths=$(Agent.TempDirectory)/*/coverage.opencover.xml
+                sonar.cs.vstest.reportsPaths=$(Agent.TempDirectory)/*.trx
+                sonar.coverage.exclusions=**/*Tests/**,**/*Test.cs,**/Migrations/**
+                sonar.exclusions=**/bin/**,**/obj/**,**/*.dll
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Build solution'
+            inputs:
+              command: 'build'
+              projects: 'Acme.Platform.sln'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Run tests with coverage'
+            inputs:
+              command: 'test'
+              projects: 'tests/**/*Tests.csproj'
+              arguments: '--configuration $(buildConfiguration) --no-build --collect:"XPlat Code Coverage" --logger trx --results-directory $(Agent.TempDirectory)'
+              publishTestResults: true
+
+          - task: SonarQubeAnalyze@5
+            displayName: 'Run SonarQube Analysis'
+
+          - task: SonarQubePublish@5
+            displayName: 'Publish SonarQube Results'
+            inputs:
+              pollingTimeoutSec: '300'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Check vulnerable packages'
+            inputs:
+              command: 'custom'
+              custom: 'list'
+              arguments: 'package --vulnerable --include-transitive'
+            continueOnError: true
+
+      - job: ContainerScan
+        displayName: 'Container Security Scan'
+        dependsOn: StaticAnalysis
+        steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: 'Build Docker images for scanning'
+            inputs:
+              containerRegistry: $(dockerRegistryServiceConnection)
+              repository: 'acme-platform/apigateway'
+              command: 'build'
+              Dockerfile: 'src/BuildingBlocks/ApiGateway/Dockerfile'
+              tags: |
+                $(imageTag)
+                scan-$(Build.BuildId)
+
+          - task: AzureContainerScan@0
+            displayName: 'Scan container image'
+            inputs:
+              image: 'acme-platform/apigateway:scan-$(Build.BuildId)'
+              scanType: 'Base'
+
+  # ============================================================================
+  # BUILD & TEST
+  # ============================================================================
+
+  - stage: BuildAndTest
+    displayName: 'Build and Test'
+    dependsOn: SecurityScan
+    jobs:
+      - job: UnitTests
+        displayName: 'Unit Tests'
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: 'Use .NET $(dotnetVersion)'
+            inputs:
+              packageType: 'sdk'
+              version: $(dotnetVersion)
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Restore packages'
+            inputs:
+              command: 'restore'
+              projects: 'Acme.Platform.sln'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Build solution'
+            inputs:
+              command: 'build'
+              projects: 'Acme.Platform.sln'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Run unit tests'
+            inputs:
+              command: 'test'
+              projects: 'tests/UnitTests/UnitTests.csproj'
+              arguments: '--configuration $(buildConfiguration) --no-build --collect:"XPlat Code Coverage" --logger trx'
+              publishTestResults: true
+
+          - task: PublishCodeCoverageResults@1
+            displayName: 'Publish code coverage'
+            inputs:
+              codeCoverageTool: 'Cobertura'
+              summaryFileLocation: '$(Agent.TempDirectory)/**/coverage.cobertura.xml'
+              pathToSources: '$(System.DefaultWorkingDirectory)'
+
+      - job: IntegrationTests
+        displayName: 'Integration Tests'
+        dependsOn: UnitTests
+        services:
+          postgres:
+            image: postgres:15
+            env:
+              POSTGRES_PASSWORD: postgres
+              POSTGRES_DB: acme_test
+            ports:
+              - 5432:5432
+          redis:
+            image: redis:7-alpine
+            ports:
+              - 6379:6379
+          rabbitmq:
+            image: rabbitmq:3-management-alpine
+            env:
+              RABBITMQ_DEFAULT_USER: guest
+              RABBITMQ_DEFAULT_PASS: guest
+            ports:
+              - 5672:5672
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: 'Use .NET $(dotnetVersion)'
+            inputs:
+              packageType: 'sdk'
+              version: $(dotnetVersion)
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Restore packages'
+            inputs:
+              command: 'restore'
+              projects: 'Acme.Platform.sln'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Build solution'
+            inputs:
+              command: 'build'
+              projects: 'Acme.Platform.sln'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Run integration tests'
+            inputs:
+              command: 'test'
+              projects: 'tests/IntegrationTests/IntegrationTests.csproj'
+              arguments: '--configuration $(buildConfiguration) --no-build --logger trx'
+              publishTestResults: true
+            env:
+              ConnectionStrings__DefaultConnection: 'Host=localhost;Port=5432;Database=acme_test;Username=postgres;Password=postgres'
+              ConnectionStrings__Redis: 'localhost:6379'
+              ConnectionStrings__RabbitMQ: 'amqp://guest:guest@localhost:5672/'
+
+      - job: ContractTests
+        displayName: 'Contract Tests'
+        dependsOn: UnitTests
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: 'Use .NET $(dotnetVersion)'
+            inputs:
+              packageType: 'sdk'
+              version: $(dotnetVersion)
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Restore packages'
+            inputs:
+              command: 'restore'
+              projects: 'Acme.Platform.sln'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Build solution'
+            inputs:
+              command: 'build'
+              projects: 'Acme.Platform.sln'
+              arguments: '--configuration $(buildConfiguration) --no-restore'
+
+          - task: DotNetCoreCLI@2
+            displayName: 'Run contract tests'
+            inputs:
+              command: 'test'
+              projects: 'tests/ContractTests/ContractTests.csproj'
+              arguments: '--configuration $(buildConfiguration) --no-build --logger trx'
+              publishTestResults: true
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish pact files'
+            inputs:
+              pathToPublish: 'tests/ContractTests/pacts'
+              artifactName: 'pact-files'
+
+  # ============================================================================
+  # PACKAGE & PUBLISH
+  # ============================================================================
+
+  - stage: Package
+    displayName: 'Package & Publish'
+    dependsOn: BuildAndTest
+    condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/main'), startsWith(variables['Build.SourceBranch'], 'refs/tags/v')))
+    jobs:
+      - job: BuildImages
+        displayName: 'Build Container Images'
+        strategy:
+          matrix:
+            ApiGateway:
+              serviceName: 'apigateway'
+              dockerfile: 'src/BuildingBlocks/ApiGateway/Dockerfile'
+            CoreWorkflowService:
+              serviceName: 'coreworkflowservice'
+              dockerfile: 'src/Services/CoreWorkflowService/Dockerfile'
+            IntegrationHub:
+              serviceName: 'integrationhub'
+              dockerfile: 'src/Services/IntegrationHub/Dockerfile'
+        steps:
+          - checkout: self
+
+          - task: Docker@2
+            displayName: 'Build and push $(serviceName) image'
+            inputs:
+              containerRegistry: $(dockerRegistryServiceConnection)
+              repository: 'acme-platform/$(serviceName)'
+              command: 'buildAndPush'
+              Dockerfile: $(dockerfile)
+              tags: |
+                $(imageTag)
+                latest
+              buildContext: '$(System.DefaultWorkingDirectory)'
+
+      - job: HelmPackage
+        displayName: 'Package Helm Charts'
+        steps:
+          - checkout: self
+
+          - task: HelmInstaller@1
+            displayName: 'Install Helm'
+            inputs:
+              helmVersionToInstall: 'latest'
+
+          - bash: |
+              for chart in deploy/k8s/helm/*/; do
+                chart_name=$(basename "$chart")
+                echo "Packaging $chart_name..."
+                helm package "$chart" --app-version "$(imageTag)" --version "$(Build.BuildNumber)"
+              done
+            displayName: 'Package Helm charts'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Helm packages'
+            inputs:
+              pathToPublish: '$(System.DefaultWorkingDirectory)/*.tgz'
+              artifactName: 'helm-charts'
+
+  # ============================================================================
+  # DEPLOYMENT
+  # ============================================================================
+
+  - stage: DeployDev
+    displayName: 'Deploy to Development'
+    dependsOn: Package
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/develop'))
+    jobs:
+      - deployment: DeployToDev
+        displayName: 'Deploy to Dev Environment'
+        environment: 'acme-platform-dev'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download Helm charts'
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: 'helm-charts'
+                    downloadPath: '$(System.ArtifactsDirectory)'
+
+                - task: KubernetesManifest@0
+                  displayName: 'Create namespace'
+                  inputs:
+                    action: 'deploy'
+                    kubernetesServiceConnection: $(kubernetesServiceConnection)
+                    namespace: '$(kubernetesNamespace)-dev'
+                    manifests: |
+                      deploy/k8s/namespace.yaml
+
+                - task: HelmDeploy@0
+                  displayName: 'Deploy API Gateway'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceConnection: $(kubernetesServiceConnection)
+                    namespace: '$(kubernetesNamespace)-dev'
+                    command: 'upgrade'
+                    chartType: 'FilePath'
+                    chartPath: '$(System.ArtifactsDirectory)/helm-charts/apigateway-$(Build.BuildNumber).tgz'
+                    releaseName: 'acme-apigateway'
+                    arguments: |
+                      --set image.tag=$(imageTag)
+                      --set environment=development
+                      --set replicaCount=1
+
+  - stage: DeployStaging
+    displayName: 'Deploy to Staging'
+    dependsOn: DeployDev
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - deployment: DeployToStaging
+        displayName: 'Deploy to Staging Environment'
+        environment: 'acme-platform-staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download Helm charts'
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: 'helm-charts'
+                    downloadPath: '$(System.ArtifactsDirectory)'
+
+                - task: HelmDeploy@0
+                  displayName: 'Deploy to Staging'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceConnection: $(kubernetesServiceConnection)
+                    namespace: '$(kubernetesNamespace)-staging'
+                    command: 'upgrade'
+                    chartType: 'FilePath'
+                    chartPath: '$(System.ArtifactsDirectory)/helm-charts/apigateway-$(Build.BuildNumber).tgz'
+                    releaseName: 'acme-apigateway'
+                    arguments: |
+                      --set image.tag=$(imageTag)
+                      --set environment=staging
+                      --set replicaCount=2
+
+                - task: Kubernetes@1
+                  displayName: 'Run smoke tests'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceConnection: $(kubernetesServiceConnection)
+                    namespace: '$(kubernetesNamespace)-staging'
+                    command: 'run'
+                    arguments: |
+                      smoke-test-$(Build.BuildId) 
+                      --image=curlimages/curl:latest 
+                      --rm -i --restart=Never 
+                      -- curl -f http://acme-apigateway.$(kubernetesNamespace)-staging.svc.cluster.local/health
+
+  - stage: DeployProduction
+    displayName: 'Deploy to Production'
+    dependsOn: DeployStaging
+    condition: and(succeeded(), startsWith(variables['Build.SourceBranch'], 'refs/tags/v'))
+    jobs:
+      - deployment: DeployToProduction
+        displayName: 'Deploy to Production Environment'
+        environment: 'acme-platform-production'
+        strategy:
+          canary:
+            increments: [25, 50, 100]
+            deploy:
+              steps:
+                - checkout: self
+
+                - task: DownloadBuildArtifacts@0
+                  displayName: 'Download Helm charts'
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: 'helm-charts'
+                    downloadPath: '$(System.ArtifactsDirectory)'
+
+                - task: HelmDeploy@0
+                  displayName: 'Canary deployment'
+                  inputs:
+                    connectionType: 'Kubernetes Service Connection'
+                    kubernetesServiceConnection: $(kubernetesServiceConnection)
+                    namespace: '$(kubernetesNamespace)-production'
+                    command: 'upgrade'
+                    chartType: 'FilePath'
+                    chartPath: '$(System.ArtifactsDirectory)/helm-charts/apigateway-$(Build.BuildNumber).tgz'
+                    releaseName: 'acme-apigateway'
+                    arguments: |
+                      --set image.tag=$(imageTag)
+                      --set environment=production
+                      --set replicaCount=3
+                      --set canary.enabled=true
+                      --set canary.weight=$(strategy.increment)
+
+            on:
+              failure:
+                steps:
+                  - task: HelmDeploy@0
+                    displayName: 'Rollback deployment'
+                    inputs:
+                      connectionType: 'Kubernetes Service Connection'
+                      kubernetesServiceConnection: $(kubernetesServiceConnection)
+                      namespace: '$(kubernetesNamespace)-production'
+                      command: 'rollback'
+                      arguments: 'acme-apigateway'
+
+              success:
+                steps:
+                  - task: Slack@1
+                    displayName: 'Notify deployment success'
+                    inputs:
+                      SlackApiToken: $(SlackToken)
+                      Channel: '#deployments'
+                      Message: |
+                        🚀 **Acme Platform $(imageTag)** deployed to production successfully!
+                        
+                        **Build:** $(Build.BuildNumber)
+                        **Commit:** $(Build.SourceVersion)
+                        **Increment:** $(strategy.increment)%
+
+  # ============================================================================
+  # POST-DEPLOYMENT
+  # ============================================================================
+
+  - stage: PostDeployment
+    displayName: 'Post-Deployment Validation'
+    dependsOn: [DeployDev, DeployStaging, DeployProduction]
+    condition: succeeded()
+    jobs:
+      - job: LoadTesting
+        displayName: 'Load Testing'
+        condition: eq(variables['Build.SourceBranch'], 'refs/heads/main')
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            displayName: 'Install Node.js'
+            inputs:
+              versionSpec: '18.x'
+
+          - bash: |
+              sudo apt-key adv --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+              echo "deb https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+              sudo apt-get update
+              sudo apt-get install k6
+            displayName: 'Install k6'
+
+          - bash: |
+              k6 run tests/load/healthcheck.k6.js \
+                --out json=results.json \
+                --env BASE_URL=https://api-staging.acme.com
+            displayName: 'Run load tests'
+
+          - task: PublishTestResults@2
+            displayName: 'Publish load test results'
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'results.json'
+              testRunTitle: 'Load Test Results'
+
+      - job: SecurityValidation
+        displayName: 'Security Validation'
+        steps:
+          - checkout: self
+
+          - task: OWASP-ZAP-Baseline-Scan@0
+            displayName: 'OWASP ZAP Baseline Scan'
+            inputs:
+              ZapApiUrl: 'https://api-staging.acme.com'
+              ZapApiKey: $(ZapApiKey)
+
+      - job: CleanupOldResources
+        displayName: 'Cleanup Old Resources'
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Cleanup old container images'
+            inputs:
+              azureSubscription: 'AzureSubscription'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                # Keep only last 10 images per repository
+                az acr repository show-tags --name $(containerRegistry) --repository acme-platform/apigateway --orderby time_desc --top 15 --query '[10:].[name]' -o tsv | \
+                while read tag; do
+                  if [[ "$tag" != "latest" ]]; then
+                    az acr repository delete --name $(containerRegistry) --image acme-platform/apigateway:$tag --yes
+                  fi
+                done
+
+          - task: Kubernetes@1
+            displayName: 'Cleanup old Kubernetes resources'
+            inputs:
+              connectionType: 'Kubernetes Service Connection'
+              kubernetesServiceConnection: $(kubernetesServiceConnection)
+              command: 'delete'
+              arguments: |
+                pods --field-selector=status.phase==Succeeded 
+                --all-namespaces
+
+# ============================================================================
+# PIPELINE VARIABLES
+# ============================================================================
+
+variables:
+  - group: 'AcmePlatform-Secrets'
+  - group: 'AzureCredentials'
+  - name: 'System.Debug'
+    value: false
